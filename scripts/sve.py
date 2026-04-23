@@ -4,7 +4,6 @@ from lib_sve import DecayMethod
 from lib_sve.xyz_sve import xyz_support
 
 from modules import scripts
-from modules.infotext_utils import PasteField
 from modules.processing import StableDiffusionProcessingTxt2Img
 from modules.script_callbacks import CFGDenoiserParams, on_cfg_denoiser
 from modules.ui_components import InputAccordion
@@ -41,16 +40,8 @@ class SeedVarianceEnhancer(scripts.Script):
             warmup_prompt = gr.Textbox(
                 value="",
                 label="Warmup Prompt (optional)",
-                lines=2,
+                lines=1,
                 info="if set, the first SVE steps use conditioning from this prompt",
-            )
-            warmup_weight = gr.Slider(
-                value=1.0,
-                minimum=0.0,
-                maximum=1.0,
-                step=0.05,
-                label="Warmup Weight",
-                info="blend strength of warmup prompt into conditioning",
             )
             with gr.Row():
                 steps = gr.Slider(value=2, minimum=1, maximum=150, step=1, label="Steps", info="the number of steps to inject random noise")
@@ -65,27 +56,16 @@ class SeedVarianceEnhancer(scripts.Script):
                 info="apply scaling to the strength based on steps",
             )
 
-        self.infotext_fields = [
-            PasteField(enable, "SVE Enable"),
-            PasteField(warmup_prompt, "SVE Warmup Prompt"),
-            PasteField(warmup_weight, "SVE Warmup Weight"),
-            PasteField(steps, "SVE Steps"),
-            PasteField(percentage, "SVE Percentage"),
-            PasteField(strength, "SVE Strength"),
-            PasteField(decay, "SVE Decay"),
-            PasteField(clamping, "SVE Clamping"),
-        ]
+        return [enable, warmup_prompt, steps, percentage, strength, decay, clamping]
 
-        return [enable, warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping]
-
-    def before_process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, warmup_weight: float, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
+    def before_process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
         enable = bool(self.XYZ_CACHE.get("enable", enable))
         SeedVarianceEnhancer.enable = enable
         if not enable:
             return
 
         SeedVarianceEnhancer.warmup_prompt = str(warmup_prompt or "").strip()
-        SeedVarianceEnhancer.warmup_weight = float(max(0.0, min(1.0, warmup_weight)))
+        SeedVarianceEnhancer.warmup_weight = 1.0
         SeedVarianceEnhancer.warmup_cond = None
         SeedVarianceEnhancer.steps = int(self.XYZ_CACHE.get("steps", steps))
         SeedVarianceEnhancer.percentage = float(self.XYZ_CACHE.get("percentage", percentage))
@@ -93,19 +73,6 @@ class SeedVarianceEnhancer(scripts.Script):
         SeedVarianceEnhancer.decay = str(self.XYZ_CACHE.get("decay", decay))
         SeedVarianceEnhancer.clamping = float(self.XYZ_CACHE.get("clamping", clamping))
         SeedVarianceEnhancer.seed = kwargs["seeds"][0]
-
-        p.extra_generation_params.update(
-            {
-                "SVE Enable": enable,
-                "SVE Warmup Prompt": SeedVarianceEnhancer.warmup_prompt,
-                "SVE Warmup Weight": SeedVarianceEnhancer.warmup_weight,
-                "SVE Steps": SeedVarianceEnhancer.steps,
-                "SVE Percentage": SeedVarianceEnhancer.percentage,
-                "SVE Strength": SeedVarianceEnhancer.strength,
-                "SVE Decay": SeedVarianceEnhancer.decay,
-                "SVE Clamping": SeedVarianceEnhancer.clamping,
-            }
-        )
 
         self.XYZ_CACHE.clear()
 
@@ -220,9 +187,11 @@ class SeedVarianceEnhancer(scripts.Script):
         cond: torch.Tensor = params.text_cond
         warmup_cond = cls.resolve_warmup_cond(params, cond)
         if cls.warmup_prompt and cls.warmup_weight > 0.0:
-            decay = 1.0 - (params.sampling_step / max(1, all_steps - 1))
-            blend_weight = float(max(0.0, min(1.0, cls.warmup_weight * decay)))
-            cond = torch.lerp(cond, warmup_cond, blend_weight)
+            blend_weight = float(max(0.0, min(1.0, cls.warmup_weight)))
+            if blend_weight >= 1.0:
+                cond = warmup_cond
+            else:
+                cond = torch.lerp(cond, warmup_cond, blend_weight)
         torch.manual_seed(cls.seed)
 
         noise_start = torch.clamp(torch.rand_like(cond), min=-cls.clamping, max=cls.clamping)
