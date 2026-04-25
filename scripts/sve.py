@@ -44,16 +44,16 @@ class SeedVarianceEnhancer(scripts.Script):
                 info="if set, the first SVE steps use conditioning from this prompt",
             )
             with gr.Row():
-                steps = gr.Slider(value=2, minimum=1, maximum=150, step=1, label="Steps", info="the number of steps to inject random noise")
-                percentage = gr.Slider(value=1.0, minimum=0.0, maximum=1.0, step=0.05, label="Percentage", info="the percentage of conditioning to inject random noise")
+                steps = gr.Slider(value=2, minimum=1, maximum=150, step=1, label="Steps", info="the number of early steps affected by SVE")
+                percentage = gr.Slider(value=1.0, minimum=0.0, maximum=1.0, step=0.05, label="Percentage", info="used only without Warmup Prompt")
             with gr.Row():
-                strength = gr.Slider(value=18, minimum=0, maximum=64, step=1, label="Strength", info="the strength of the random noise")
-                clamping = gr.Slider(value=1.0, minimum=0.0, maximum=1.0, step=0.05, label="Clamping", info="reduce effect strength by clamping the initial noise")
+                strength = gr.Slider(value=18, minimum=0, maximum=64, step=1, label="Strength", info="used only without Warmup Prompt")
+                clamping = gr.Slider(value=1.0, minimum=0.0, maximum=1.0, step=0.05, label="Clamping", info="used only without Warmup Prompt")
             decay = gr.Dropdown(
                 value="No Decay",
                 choices=DecayMethod.choices(),
                 label="Decay",
-                info="apply scaling to the strength based on steps",
+                info="used only without Warmup Prompt",
             )
 
         return [enable, warmup_prompt, steps, percentage, strength, decay, clamping]
@@ -185,19 +185,17 @@ class SeedVarianceEnhancer(scripts.Script):
             return
 
         cond: torch.Tensor = params.text_cond
-        warmup_cond = cls.resolve_warmup_cond(params, cond)
-        if cls.warmup_prompt and cls.warmup_weight > 0.0:
-            blend_weight = float(max(0.0, min(1.0, cls.warmup_weight)))
-            if blend_weight >= 1.0:
-                cond = warmup_cond
-            else:
-                cond = torch.lerp(cond, warmup_cond, blend_weight)
-        torch.manual_seed(cls.seed)
+        if cls.warmup_prompt:
+            params.text_cond = cls.resolve_warmup_cond(params, cond)
+            return
 
-        noise_start = torch.clamp(torch.rand_like(cond), min=-cls.clamping, max=cls.clamping)
+        generator = torch.Generator(device=cond.device)
+        generator.manual_seed(cls.seed)
+
+        noise_start = torch.clamp(torch.rand(cond.shape, device=cond.device, dtype=cond.dtype, generator=generator), min=-cls.clamping, max=cls.clamping)
         strength = cls.apply_decay(params.sampling_step, all_steps, cls.strength)
         noise = noise_start * 2.0 * strength - strength
-        noise_mask = torch.bernoulli(noise_start * cls.percentage).bool()
+        noise_mask = torch.bernoulli(noise_start * cls.percentage, generator=generator).bool()
 
         modified_noise = noise * noise_mask
         params.text_cond = cond + modified_noise
