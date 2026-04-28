@@ -24,6 +24,7 @@ class SeedVarianceEnhancer(scripts.Script):
     warmup_prompt: str = ""
     warmup_weight: float = 1.0
     warmup_cond: torch.Tensor | None = None
+    warmup_raw_cond = None
 
     def __init__(self):
         xyz_support(self.XYZ_CACHE)
@@ -62,11 +63,16 @@ class SeedVarianceEnhancer(scripts.Script):
         enable = bool(self.XYZ_CACHE.get("enable", enable))
         SeedVarianceEnhancer.enable = enable
         if not enable:
+            SeedVarianceEnhancer.warmup_prompt = ""
+            SeedVarianceEnhancer.warmup_cond = None
+            SeedVarianceEnhancer.warmup_raw_cond = None
+            self.XYZ_CACHE.clear()
             return
 
         SeedVarianceEnhancer.warmup_prompt = str(warmup_prompt or "").strip()
         SeedVarianceEnhancer.warmup_weight = 1.0
         SeedVarianceEnhancer.warmup_cond = None
+        SeedVarianceEnhancer.warmup_raw_cond = None
         SeedVarianceEnhancer.steps = int(self.XYZ_CACHE.get("steps", steps))
         SeedVarianceEnhancer.percentage = float(self.XYZ_CACHE.get("percentage", percentage))
         SeedVarianceEnhancer.strength = int(self.XYZ_CACHE.get("strength", strength))
@@ -75,6 +81,22 @@ class SeedVarianceEnhancer(scripts.Script):
         SeedVarianceEnhancer.seed = kwargs["seeds"][0]
 
         self.XYZ_CACHE.clear()
+
+    def process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
+        if not SeedVarianceEnhancer.enable or not SeedVarianceEnhancer.warmup_prompt:
+            return
+
+        prompts = kwargs.get("prompts") or p.prompts or [SeedVarianceEnhancer.warmup_prompt]
+        batch_size = len(prompts)
+        warmup_prompts = [SeedVarianceEnhancer.warmup_prompt] * batch_size
+
+        try:
+            SeedVarianceEnhancer.restore_legacy_warmup_shift(p)
+            SeedVarianceEnhancer.warmup_raw_cond = p.sd_model.get_learned_conditioning(warmup_prompts)
+        except Exception:
+            SeedVarianceEnhancer.warmup_raw_cond = None
+        finally:
+            SeedVarianceEnhancer.restore_main_shift(p)
 
     @classmethod
     def apply_decay(cls, current_step, total_steps, strength):
@@ -141,6 +163,28 @@ class SeedVarianceEnhancer(scripts.Script):
         return tensor if tensor.shape == target.shape else None
 
     @classmethod
+    def restore_legacy_warmup_shift(cls, p: StableDiffusionProcessingTxt2Img):
+        sd_model = getattr(p, "sd_model", None)
+        if sd_model is None or not getattr(sd_model, "use_shift", False):
+            return
+
+        try:
+            sd_model.forge_objects.unet.model.predictor.set_parameters(shift=3.0)
+        except Exception:
+            return
+
+    @classmethod
+    def restore_main_shift(cls, p: StableDiffusionProcessingTxt2Img):
+        sd_model = getattr(p, "sd_model", None)
+        if sd_model is None or not getattr(sd_model, "use_shift", False):
+            return
+
+        try:
+            sd_model.set_shift(shift=p.distilled_cfg_scale)
+        except Exception:
+            return
+
+    @classmethod
     @torch.inference_mode()
     def resolve_warmup_cond(cls, params: CFGDenoiserParams, cond: torch.Tensor) -> torch.Tensor:
         if not cls.warmup_prompt:
@@ -152,11 +196,11 @@ class SeedVarianceEnhancer(scripts.Script):
             prompts = [cls.warmup_prompt] * batch_size
 
             try:
-                learned = p.sd_model.get_learned_conditioning(prompts)
+                cls.restore_legacy_warmup_shift(p)
+                learned = cls.warmup_raw_cond if cls.warmup_raw_cond is not None else p.sd_model.get_learned_conditioning(prompts)
             except Exception:
                 cls.warmup_cond = None
                 return cond
-
             learned_tensor = cls.extract_cond_tensor(learned)
             if not isinstance(learned_tensor, torch.Tensor):
                 cls.warmup_cond = None
@@ -181,11 +225,12 @@ class SeedVarianceEnhancer(scripts.Script):
         all_steps: int = min(cls.steps, params.total_sampling_steps)
         if all_steps <= 0:
             return
-        if params.sampling_step >= all_steps:
+        if all_steps < params.sampling_step:
             return
 
         cond: torch.Tensor = params.text_cond
         if cls.warmup_prompt:
+            cls.restore_legacy_warmup_shift(params.denoiser.p)
             params.text_cond = cls.resolve_warmup_cond(params, cond)
             return
 
