@@ -39,20 +39,23 @@ class SeedVarianceEnhancer(scripts.Script):
     def ui(self, is_img2img):
         with InputAccordion(value=False, label=self.title()) as enable:
             gr.HTML("Improve seed-to-seed image variance for distilled models <b>(i.e. CFG = 1.0)</b>")
-            warmup_prompt = gr.Textbox(
-                value="",
-                label="Warmup Prompt (optional)",
-                lines=1,
-                info="if set, the first SVE steps use conditioning from this prompt",
-            )
-            warmup_weight = gr.Slider(
-                value=1.0,
-                minimum=0.0,
-                maximum=1.0,
-                step=0.05,
-                label="Warmup Weight",
-                info="strength of Warmup Prompt during early SVE steps",
-            )
+            with gr.Row():
+                warmup_prompt = gr.Textbox(
+                    value="",
+                    label="Warmup Prompt (optional)",
+                    lines=1,
+                    info="if set, the first SVE steps use conditioning from this prompt",
+                    scale=1,
+                )
+                warmup_weight = gr.Slider(
+                    value=1.0,
+                    minimum=0.0,
+                    maximum=1.0,
+                    step=0.05,
+                    label="Warmup Weight",
+                    info="strength of Warmup Prompt during early SVE steps",
+                    scale=1,
+                )
             with gr.Row():
                 steps = gr.Slider(value=2, minimum=1, maximum=self.MAX_STEPS, step=1, label="Steps", info="the number of early steps affected by SVE")
                 percentage = gr.Slider(value=1.0, minimum=0.0, maximum=1.0, step=0.05, label="Percentage", info="used only without Warmup Prompt")
