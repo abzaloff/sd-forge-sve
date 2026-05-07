@@ -3,7 +3,7 @@ import torch
 from lib_sve import DecayMethod
 from lib_sve.xyz_sve import xyz_support
 
-from modules import scripts
+from modules import prompt_parser, scripts
 from modules.processing import StableDiffusionProcessingTxt2Img
 from modules.script_callbacks import CFGDenoiserParams, on_cfg_denoiser
 from modules.ui_components import InputAccordion
@@ -11,6 +11,7 @@ from modules.ui_components import InputAccordion
 
 class SeedVarianceEnhancer(scripts.Script):
     sorting_priority = 1125
+    MAX_STEPS = 50
 
     enable: bool = False
     seed: int = -1
@@ -23,7 +24,7 @@ class SeedVarianceEnhancer(scripts.Script):
     clamping: float = 1.0
     warmup_prompt: str = ""
     warmup_weight: float = 1.0
-    warmup_cond: torch.Tensor | None = None
+    warmup_cond = None
     warmup_raw_cond = None
 
     def __init__(self):
@@ -44,8 +45,16 @@ class SeedVarianceEnhancer(scripts.Script):
                 lines=1,
                 info="if set, the first SVE steps use conditioning from this prompt",
             )
+            warmup_weight = gr.Slider(
+                value=1.0,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.05,
+                label="Warmup Weight",
+                info="strength of Warmup Prompt during early SVE steps",
+            )
             with gr.Row():
-                steps = gr.Slider(value=2, minimum=1, maximum=150, step=1, label="Steps", info="the number of early steps affected by SVE")
+                steps = gr.Slider(value=2, minimum=1, maximum=self.MAX_STEPS, step=1, label="Steps", info="the number of early steps affected by SVE")
                 percentage = gr.Slider(value=1.0, minimum=0.0, maximum=1.0, step=0.05, label="Percentage", info="used only without Warmup Prompt")
             with gr.Row():
                 strength = gr.Slider(value=18, minimum=0, maximum=64, step=1, label="Strength", info="used only without Warmup Prompt")
@@ -57,9 +66,9 @@ class SeedVarianceEnhancer(scripts.Script):
                 info="used only without Warmup Prompt",
             )
 
-        return [enable, warmup_prompt, steps, percentage, strength, decay, clamping]
+        return [enable, warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping]
 
-    def before_process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
+    def before_process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, warmup_weight: float, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
         enable = bool(self.XYZ_CACHE.get("enable", enable))
         SeedVarianceEnhancer.enable = enable
         if not enable:
@@ -70,10 +79,10 @@ class SeedVarianceEnhancer(scripts.Script):
             return
 
         SeedVarianceEnhancer.warmup_prompt = str(warmup_prompt or "").strip()
-        SeedVarianceEnhancer.warmup_weight = 1.0
+        SeedVarianceEnhancer.warmup_weight = float(warmup_weight)
         SeedVarianceEnhancer.warmup_cond = None
         SeedVarianceEnhancer.warmup_raw_cond = None
-        SeedVarianceEnhancer.steps = int(self.XYZ_CACHE.get("steps", steps))
+        SeedVarianceEnhancer.steps = min(int(self.XYZ_CACHE.get("steps", steps)), self.MAX_STEPS)
         SeedVarianceEnhancer.percentage = float(self.XYZ_CACHE.get("percentage", percentage))
         SeedVarianceEnhancer.strength = int(self.XYZ_CACHE.get("strength", strength))
         SeedVarianceEnhancer.decay = str(self.XYZ_CACHE.get("decay", decay))
@@ -82,21 +91,23 @@ class SeedVarianceEnhancer(scripts.Script):
 
         self.XYZ_CACHE.clear()
 
-    def process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
+    def process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, warmup_weight: float, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
         if not SeedVarianceEnhancer.enable or not SeedVarianceEnhancer.warmup_prompt:
             return
 
         prompts = kwargs.get("prompts") or p.prompts or [SeedVarianceEnhancer.warmup_prompt]
         batch_size = len(prompts)
-        warmup_prompts = [SeedVarianceEnhancer.warmup_prompt] * batch_size
+        warmup_prompts = prompt_parser.SdConditioning(
+            [SeedVarianceEnhancer.warmup_prompt] * batch_size,
+            width=p.width,
+            height=p.height,
+            distilled_cfg_scale=p.distilled_cfg_scale,
+        )
 
         try:
-            SeedVarianceEnhancer.restore_legacy_warmup_shift(p)
             SeedVarianceEnhancer.warmup_raw_cond = p.sd_model.get_learned_conditioning(warmup_prompts)
         except Exception:
             SeedVarianceEnhancer.warmup_raw_cond = None
-        finally:
-            SeedVarianceEnhancer.restore_main_shift(p)
 
     @classmethod
     def apply_decay(cls, current_step, total_steps, strength):
@@ -163,26 +174,71 @@ class SeedVarianceEnhancer(scripts.Script):
         return tensor if tensor.shape == target.shape else None
 
     @classmethod
-    def restore_legacy_warmup_shift(cls, p: StableDiffusionProcessingTxt2Img):
-        sd_model = getattr(p, "sd_model", None)
-        if sd_model is None or not getattr(sd_model, "use_shift", False):
-            return
-
-        try:
-            sd_model.forge_objects.unet.model.predictor.set_parameters(shift=3.0)
-        except Exception:
-            return
+    def same_conditioning_shape(cls, source, target) -> bool:
+        if isinstance(source, torch.Tensor) and isinstance(target, torch.Tensor):
+            return source.shape == target.shape
+        if isinstance(source, dict) and isinstance(target, dict):
+            if source.keys() != target.keys():
+                return False
+            return all(
+                not isinstance(target[key], torch.Tensor)
+                or (isinstance(source.get(key), torch.Tensor) and source[key].shape == target[key].shape)
+                for key in target
+            )
+        return False
 
     @classmethod
-    def restore_main_shift(cls, p: StableDiffusionProcessingTxt2Img):
-        sd_model = getattr(p, "sd_model", None)
-        if sd_model is None or not getattr(sd_model, "use_shift", False):
-            return
+    def adapt_conditioning(cls, learned, target):
+        if isinstance(learned, dict) and isinstance(target, dict):
+            adapted = {}
+            for key, target_value in target.items():
+                source_value = learned.get(key)
+                if isinstance(target_value, torch.Tensor):
+                    if not isinstance(source_value, torch.Tensor):
+                        return None
+                    tensor = cls.adapt_tensor_shape(source_value, target_value)
+                    if not isinstance(tensor, torch.Tensor):
+                        return None
+                    adapted[key] = tensor.to(device=target_value.device, dtype=target_value.dtype)
+                else:
+                    adapted[key] = source_value if source_value is not None else target_value
 
-        try:
-            sd_model.set_shift(shift=p.distilled_cfg_scale)
-        except Exception:
-            return
+            return prompt_parser.DictWithShape(adapted) if hasattr(prompt_parser, "DictWithShape") else adapted
+
+        learned_tensor = cls.extract_cond_tensor(learned)
+        if not isinstance(learned_tensor, torch.Tensor) or not isinstance(target, torch.Tensor):
+            return None
+
+        adapted = cls.adapt_tensor_shape(learned_tensor, target)
+        if not isinstance(adapted, torch.Tensor):
+            return None
+
+        return adapted.to(device=target.device, dtype=target.dtype)
+
+    @classmethod
+    def apply_warmup_weight(cls, warmup, base):
+        weight = max(0.0, min(1.0, float(cls.warmup_weight)))
+        weight = 1.0 - (1.0 - weight) ** 2
+        if weight >= 1.0:
+            return warmup
+        if weight <= 0.0:
+            return base
+
+        if isinstance(warmup, torch.Tensor) and isinstance(base, torch.Tensor):
+            return base + (warmup - base) * weight
+
+        if isinstance(warmup, dict) and isinstance(base, dict):
+            weighted = {}
+            for key, base_value in base.items():
+                warmup_value = warmup.get(key)
+                if isinstance(base_value, torch.Tensor) and isinstance(warmup_value, torch.Tensor):
+                    weighted[key] = base_value + (warmup_value - base_value) * weight
+                else:
+                    weighted[key] = warmup_value if warmup_value is not None else base_value
+
+            return prompt_parser.DictWithShape(weighted) if hasattr(prompt_parser, "DictWithShape") else weighted
+
+        return warmup
 
     @classmethod
     @torch.inference_mode()
@@ -190,30 +246,26 @@ class SeedVarianceEnhancer(scripts.Script):
         if not cls.warmup_prompt:
             return cond
 
-        if cls.warmup_cond is None or cls.warmup_cond.shape != cond.shape:
+        if cls.warmup_cond is None or not cls.same_conditioning_shape(cls.warmup_cond, cond):
             p: StableDiffusionProcessingTxt2Img = params.denoiser.p
             batch_size = cond.shape[0]
-            prompts = [cls.warmup_prompt] * batch_size
+            prompts = prompt_parser.SdConditioning(
+                [cls.warmup_prompt] * batch_size,
+                width=p.width,
+                height=p.height,
+                distilled_cfg_scale=p.distilled_cfg_scale,
+            )
 
             try:
-                cls.restore_legacy_warmup_shift(p)
                 learned = cls.warmup_raw_cond if cls.warmup_raw_cond is not None else p.sd_model.get_learned_conditioning(prompts)
             except Exception:
                 cls.warmup_cond = None
                 return cond
-            learned_tensor = cls.extract_cond_tensor(learned)
-            if not isinstance(learned_tensor, torch.Tensor):
-                cls.warmup_cond = None
+            cls.warmup_cond = cls.adapt_conditioning(learned, cond)
+            if cls.warmup_cond is None:
                 return cond
 
-            adapted = cls.adapt_tensor_shape(learned_tensor, cond)
-            if not isinstance(adapted, torch.Tensor):
-                cls.warmup_cond = None
-                return cond
-
-            cls.warmup_cond = adapted.to(device=cond.device, dtype=cond.dtype)
-
-        return cls.warmup_cond
+        return cls.apply_warmup_weight(cls.warmup_cond, cond)
 
     @classmethod
     @torch.inference_mode()
@@ -222,15 +274,16 @@ class SeedVarianceEnhancer(scripts.Script):
             return
         if params.text_cond is None:
             return
-        all_steps: int = min(cls.steps, params.total_sampling_steps)
+        current_step = getattr(params.denoiser, "step", params.sampling_step)
+        total_steps = getattr(params.denoiser, "total_steps", params.total_sampling_steps)
+        all_steps: int = min(cls.steps, total_steps)
         if all_steps <= 0:
             return
-        if all_steps < params.sampling_step:
+        if all_steps < current_step:
             return
 
         cond: torch.Tensor = params.text_cond
         if cls.warmup_prompt:
-            cls.restore_legacy_warmup_shift(params.denoiser.p)
             params.text_cond = cls.resolve_warmup_cond(params, cond)
             return
 
