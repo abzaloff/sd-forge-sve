@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import gradio as gr
 import torch
 from lib_sve import DecayMethod
@@ -12,6 +15,18 @@ from modules.ui_components import InputAccordion
 class SeedVarianceEnhancer(scripts.Script):
     sorting_priority = 1125
     MAX_STEPS = 50
+    MODEL_TYPES = ["sd", "xl", "flux", "klein", "qwen", "lumina", "zit", "wan", "anima", "ernie", "pid", "krea"]
+    DEFAULT_SETTINGS = {
+        "warmup_prompt": "",
+        "warmup_weight": 1.0,
+        "steps": 2,
+        "percentage": 1.0,
+        "strength": 18,
+        "decay": "No Decay",
+        "clamping": 1.0,
+    }
+    PRESETS_PATH = Path(__file__).resolve().parents[1] / "sve_presets.json"
+    LAST_PRESET_KEY = "__last_preset__"
 
     enable: bool = False
     seed: int = -1
@@ -31,24 +46,34 @@ class SeedVarianceEnhancer(scripts.Script):
         xyz_support(self.XYZ_CACHE)
 
     def title(self):
-        return "Seed Variance Enhancer"
+        return "SVE"
 
     def show(self, is_img2img):
         return None if is_img2img else scripts.AlwaysVisible
 
     def ui(self, is_img2img):
+        default_model = self.last_preset_model()
+        default_settings = self.settings_for_model(default_model)
         with InputAccordion(value=False, label=self.title()) as enable:
             gr.HTML("Improve seed-to-seed image variance for distilled models <b>(i.e. CFG = 1.0)</b>")
             with gr.Row():
+                preset_model = gr.Dropdown(
+                    value=default_model,
+                    choices=self.MODEL_TYPES,
+                    label="SVE Preset",
+                    scale=1,
+                )
+                save_preset = gr.Button(value="Save", variant="secondary", scale=0, min_width=96)
+            with gr.Row():
                 warmup_prompt = gr.Textbox(
-                    value="",
+                    value=default_settings["warmup_prompt"],
                     label="Warmup Prompt (optional)",
                     lines=1,
                     info="if set, the first SVE steps use conditioning from this prompt",
                     scale=1,
                 )
                 warmup_weight = gr.Slider(
-                    value=1.0,
+                    value=default_settings["warmup_weight"],
                     minimum=0.0,
                     maximum=1.0,
                     step=0.05,
@@ -57,19 +82,106 @@ class SeedVarianceEnhancer(scripts.Script):
                     scale=1,
                 )
             with gr.Row():
-                steps = gr.Slider(value=2, minimum=1, maximum=self.MAX_STEPS, step=1, label="Steps", info="the number of early steps affected by SVE")
-                percentage = gr.Slider(value=1.0, minimum=0.0, maximum=1.0, step=0.05, label="Percentage", info="used only without Warmup Prompt")
+                steps = gr.Slider(value=default_settings["steps"], minimum=1, maximum=self.MAX_STEPS, step=1, label="Steps", info="the number of early steps affected by SVE")
+                percentage = gr.Slider(value=default_settings["percentage"], minimum=0.0, maximum=1.0, step=0.05, label="Percentage", info="used only without Warmup Prompt")
             with gr.Row():
-                strength = gr.Slider(value=18, minimum=0, maximum=64, step=1, label="Strength", info="used only without Warmup Prompt")
-                clamping = gr.Slider(value=1.0, minimum=0.0, maximum=1.0, step=0.05, label="Clamping", info="used only without Warmup Prompt")
+                strength = gr.Slider(value=default_settings["strength"], minimum=0, maximum=64, step=1, label="Strength", info="used only without Warmup Prompt")
+                clamping = gr.Slider(value=default_settings["clamping"], minimum=0.0, maximum=1.0, step=0.05, label="Clamping", info="used only without Warmup Prompt")
             decay = gr.Dropdown(
-                value="No Decay",
+                value=default_settings["decay"],
                 choices=DecayMethod.choices(),
                 label="Decay",
                 info="used only without Warmup Prompt",
             )
 
+            preset_model.change(
+                fn=self.load_model_settings,
+                inputs=[preset_model],
+                outputs=[warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping],
+            )
+            save_preset.click(
+                fn=self.save_model_settings,
+                inputs=[preset_model, warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping],
+                outputs=[],
+            )
+
         return [enable, warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping]
+
+    @classmethod
+    def load_presets(cls) -> dict:
+        try:
+            with cls.PRESETS_PATH.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+        return data if isinstance(data, dict) else {}
+
+    @classmethod
+    def save_presets(cls, presets: dict):
+        with cls.PRESETS_PATH.open("w", encoding="utf-8") as file:
+            json.dump(presets, file, indent=2, sort_keys=True)
+
+    @classmethod
+    def last_preset_model(cls) -> str:
+        model_type = cls.load_presets().get(cls.LAST_PRESET_KEY, "sd")
+        return model_type if model_type in cls.MODEL_TYPES else "sd"
+
+    @classmethod
+    def save_last_preset_model(cls, model_type: str):
+        if model_type not in cls.MODEL_TYPES:
+            return
+        presets = cls.load_presets()
+        presets[cls.LAST_PRESET_KEY] = model_type
+        cls.save_presets(presets)
+
+    @classmethod
+    def settings_for_model(cls, model_type: str) -> dict:
+        settings = cls.DEFAULT_SETTINGS.copy()
+        saved = cls.load_presets().get(model_type, {})
+        if isinstance(saved, dict):
+            settings.update(saved)
+
+        settings["warmup_weight"] = max(0.0, min(1.0, float(settings["warmup_weight"])))
+        settings["steps"] = max(1, min(cls.MAX_STEPS, int(settings["steps"])))
+        settings["percentage"] = max(0.0, min(1.0, float(settings["percentage"])))
+        settings["strength"] = max(0, min(64, int(settings["strength"])))
+        settings["clamping"] = max(0.0, min(1.0, float(settings["clamping"])))
+        if settings["decay"] not in DecayMethod.choices():
+            settings["decay"] = cls.DEFAULT_SETTINGS["decay"]
+        return settings
+
+    @classmethod
+    def load_model_settings(cls, model_type: str):
+        cls.save_last_preset_model(model_type)
+        settings = cls.settings_for_model(model_type)
+        return [
+            settings["warmup_prompt"],
+            settings["warmup_weight"],
+            settings["steps"],
+            settings["percentage"],
+            settings["strength"],
+            settings["decay"],
+            settings["clamping"],
+        ]
+
+    @classmethod
+    def save_model_settings(cls, model_type: str, warmup_prompt: str, warmup_weight: float, steps: int, percentage: float, strength: int, decay: str, clamping: float):
+        if model_type not in cls.MODEL_TYPES:
+            return
+
+        presets = cls.load_presets()
+        presets[model_type] = {
+            "warmup_prompt": str(warmup_prompt or ""),
+            "warmup_weight": max(0.0, min(1.0, float(warmup_weight))),
+            "steps": max(1, min(cls.MAX_STEPS, int(steps))),
+            "percentage": max(0.0, min(1.0, float(percentage))),
+            "strength": max(0, min(64, int(strength))),
+            "decay": decay if decay in DecayMethod.choices() else cls.DEFAULT_SETTINGS["decay"],
+            "clamping": max(0.0, min(1.0, float(clamping))),
+        }
+        presets[cls.LAST_PRESET_KEY] = model_type
+        cls.save_presets(presets)
 
     def before_process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, warmup_weight: float, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
         enable = bool(self.XYZ_CACHE.get("enable", enable))
@@ -169,9 +281,9 @@ class SeedVarianceEnhancer(scripts.Script):
                 index[dim] = slice(0, dst)
                 tensor = tensor[tuple(index)]
             else:
-                pad_shape = list(tensor.shape)
-                pad_shape[dim] = dst - src
-                pad = torch.zeros(pad_shape, device=tensor.device, dtype=tensor.dtype)
+                index = [slice(None)] * tensor.dim()
+                index[dim] = slice(src - 1, src)
+                pad = tensor[tuple(index)].repeat(*[dst - src if i == dim else 1 for i in range(tensor.dim())])
                 tensor = torch.cat((tensor, pad), dim=dim)
 
         return tensor if tensor.shape == target.shape else None
@@ -219,9 +331,51 @@ class SeedVarianceEnhancer(scripts.Script):
         return adapted.to(device=target.device, dtype=target.dtype)
 
     @classmethod
+    def stack_full_conditioning(cls, learned, target):
+        if isinstance(learned, torch.Tensor):
+            tensor = learned
+            if isinstance(target, torch.Tensor):
+                if tensor.dim() == target.dim() - 1:
+                    tensor = tensor.unsqueeze(0)
+                if tensor.dim() == target.dim() and tensor.shape[0] != target.shape[0]:
+                    tensor = cls.adapt_tensor_shape(tensor, torch.empty((target.shape[0], *tensor.shape[1:]), device=target.device, dtype=target.dtype))
+                    if not isinstance(tensor, torch.Tensor):
+                        return None
+                return tensor.to(device=target.device, dtype=target.dtype)
+            return tensor
+
+        if isinstance(learned, dict) and isinstance(target, dict):
+            stacked = {}
+            for key, value in learned.items():
+                target_value = target.get(key)
+                if isinstance(value, torch.Tensor) and isinstance(target_value, torch.Tensor):
+                    stacked[key] = cls.stack_full_conditioning(value, target_value)
+                else:
+                    stacked[key] = value
+            return prompt_parser.DictWithShape(stacked) if hasattr(prompt_parser, "DictWithShape") else stacked
+
+        if isinstance(learned, (list, tuple)) and learned:
+            if all(isinstance(value, torch.Tensor) for value in learned):
+                stacked = prompt_parser.stack_conds(list(learned))
+                return stacked.to(device=target.device, dtype=target.dtype) if isinstance(target, torch.Tensor) else stacked
+            if all(isinstance(value, dict) for value in learned):
+                keys = list(learned[0].keys())
+                stacked = {}
+                for key in keys:
+                    values = [value[key] for value in learned if key in value]
+                    target_value = target.get(key) if isinstance(target, dict) else None
+                    if values and all(isinstance(value, torch.Tensor) for value in values):
+                        stacked_value = prompt_parser.stack_conds(values)
+                        if isinstance(target_value, torch.Tensor):
+                            stacked_value = stacked_value.to(device=target_value.device, dtype=target_value.dtype)
+                        stacked[key] = stacked_value
+                return prompt_parser.DictWithShape(stacked) if hasattr(prompt_parser, "DictWithShape") else stacked
+
+        return cls.adapt_conditioning(learned, target)
+
+    @classmethod
     def apply_warmup_weight(cls, warmup, base):
         weight = max(0.0, min(1.0, float(cls.warmup_weight)))
-        weight = 1.0 - (1.0 - weight) ** 2
         if weight >= 1.0:
             return warmup
         if weight <= 0.0:
@@ -249,7 +403,8 @@ class SeedVarianceEnhancer(scripts.Script):
         if not cls.warmup_prompt:
             return cond
 
-        if cls.warmup_cond is None or not cls.same_conditioning_shape(cls.warmup_cond, cond):
+        weight = max(0.0, min(1.0, float(cls.warmup_weight)))
+        if cls.warmup_cond is None or (weight < 1.0 and not cls.same_conditioning_shape(cls.warmup_cond, cond)):
             p: StableDiffusionProcessingTxt2Img = params.denoiser.p
             batch_size = cond.shape[0]
             prompts = prompt_parser.SdConditioning(
@@ -264,7 +419,7 @@ class SeedVarianceEnhancer(scripts.Script):
             except Exception:
                 cls.warmup_cond = None
                 return cond
-            cls.warmup_cond = cls.adapt_conditioning(learned, cond)
+            cls.warmup_cond = cls.stack_full_conditioning(learned, cond) if weight >= 1.0 else cls.adapt_conditioning(learned, cond)
             if cls.warmup_cond is None:
                 return cond
 
@@ -282,7 +437,7 @@ class SeedVarianceEnhancer(scripts.Script):
         all_steps: int = min(cls.steps, total_steps)
         if all_steps <= 0:
             return
-        if all_steps < current_step:
+        if current_step >= all_steps:
             return
 
         cond: torch.Tensor = params.text_cond
