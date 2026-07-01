@@ -94,6 +94,9 @@ class SeedVarianceEnhancer(scripts.Script):
                 info="used only without Warmup Prompt",
             )
 
+            for component in (preset_model, warmup_prompt, warmup_weight, steps, percentage, strength, clamping, decay):
+                component.do_not_save_to_config = True
+
             preset_model.change(
                 fn=self.load_model_settings,
                 inputs=[preset_model],
