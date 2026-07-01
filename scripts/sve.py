@@ -56,14 +56,38 @@ class SeedVarianceEnhancer(scripts.Script):
         default_settings = self.settings_for_model(default_model)
         with InputAccordion(value=False, label=self.title()) as enable:
             gr.HTML("Improve seed-to-seed image variance for distilled models <b>(i.e. CFG = 1.0)</b>")
-            with gr.Row():
-                preset_model = gr.Dropdown(
-                    value=default_model,
-                    choices=self.MODEL_TYPES,
-                    label="SVE Preset",
-                    scale=1,
-                )
-                save_preset = gr.Button(value="Save", variant="secondary", scale=0, min_width=96)
+            gr.HTML(
+                """
+                <style>
+                #sve_preset_row {
+                    align-items: flex-start !important;
+                }
+                #sve_preset_row .form {
+                    min-height: 38px !important;
+                }
+                #sve_save_preset_btn,
+                button#sve_save_preset_btn,
+                #sve_save_preset_btn > button {
+                    min-height: 38px !important;
+                    height: 38px !important;
+                    padding-top: 0 !important;
+                    padding-bottom: 0 !important;
+                }
+                </style>
+                """
+            )
+            with gr.Row(elem_id="sve_preset_row"):
+                with gr.Column(scale=1):
+                    gr.HTML("<div style='height: 22px; line-height: 22px; font-weight: 600;'>SVE Preset</div>")
+                    preset_model = gr.Dropdown(
+                        value=default_model,
+                        choices=self.MODEL_TYPES,
+                        show_label=False,
+                        container=False,
+                    )
+                with gr.Column(scale=0, min_width=96):
+                    save_status = gr.HTML(value="<div style='height: 22px; line-height: 22px; text-align: center;'></div>")
+                    save_preset = gr.Button(value="Save", variant="secondary", elem_id="sve_save_preset_btn")
             with gr.Row():
                 warmup_prompt = gr.Textbox(
                     value=default_settings["warmup_prompt"],
@@ -100,12 +124,12 @@ class SeedVarianceEnhancer(scripts.Script):
             preset_model.change(
                 fn=self.load_model_settings,
                 inputs=[preset_model],
-                outputs=[warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping],
+                outputs=[warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping, save_status],
             )
             save_preset.click(
                 fn=self.save_model_settings,
                 inputs=[preset_model, warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping],
-                outputs=[],
+                outputs=[save_status],
             )
 
         return [enable, warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping]
@@ -166,6 +190,7 @@ class SeedVarianceEnhancer(scripts.Script):
             settings["strength"],
             settings["decay"],
             settings["clamping"],
+            "<div style='height: 22px; line-height: 22px; text-align: center;'></div>",
         ]
 
     @classmethod
@@ -185,6 +210,7 @@ class SeedVarianceEnhancer(scripts.Script):
         }
         presets[cls.LAST_PRESET_KEY] = model_type
         cls.save_presets(presets)
+        return "<div style='height: 22px; line-height: 22px; color: var(--body-text-color-subdued); text-align: center;'>Saved</div>"
 
     def before_process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, warmup_weight: float, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
         enable = bool(self.XYZ_CACHE.get("enable", enable))
