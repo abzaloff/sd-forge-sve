@@ -15,7 +15,7 @@ from modules.ui_components import InputAccordion
 class SeedVarianceEnhancer(scripts.Script):
     sorting_priority = 1125
     MAX_STEPS = 50
-    MODEL_TYPES = ["sd", "xl", "flux", "klein", "qwen", "lumina", "zit", "wan", "anima", "ernie", "pid", "krea"]
+    DEFAULT_PRESETS = ["sd", "xl", "flux", "klein", "qwen", "lumina", "zit", "wan", "anima", "ernie", "pid", "krea"]
     DEFAULT_SETTINGS = {
         "warmup_prompt": "",
         "warmup_weight": 1.0,
@@ -81,9 +81,10 @@ class SeedVarianceEnhancer(scripts.Script):
                     gr.HTML("<div style='height: 22px; line-height: 22px; font-weight: 600;'>SVE Preset</div>")
                     preset_model = gr.Dropdown(
                         value=default_model,
-                        choices=self.MODEL_TYPES,
+                        choices=self.preset_choices(),
                         show_label=False,
                         container=False,
+                        allow_custom_value=True,
                     )
                 with gr.Column(scale=0, min_width=96):
                     save_status = gr.HTML(value="<div style='height: 22px; line-height: 22px; text-align: center;'></div>")
@@ -101,8 +102,8 @@ class SeedVarianceEnhancer(scripts.Script):
                     minimum=0.0,
                     maximum=1.0,
                     step=0.05,
-                    label="Warmup Weight",
-                    info="strength of Warmup Prompt during early SVE steps",
+                    label="Warmup Blend",
+                    info="1.0 is a hard ComfyUI-style prompt switch; lower values intentionally blend prompts",
                     scale=1,
                 )
             with gr.Row():
@@ -150,13 +151,27 @@ class SeedVarianceEnhancer(scripts.Script):
             json.dump(presets, file, indent=2, sort_keys=True)
 
     @classmethod
+    def preset_choices(cls) -> list[str]:
+        saved = [
+            key
+            for key, value in cls.load_presets().items()
+            if key != cls.LAST_PRESET_KEY and isinstance(key, str) and isinstance(value, dict)
+        ]
+        return list(dict.fromkeys([*cls.DEFAULT_PRESETS, *saved]))
+
+    @classmethod
+    def normalize_preset_name(cls, model_type: str) -> str:
+        return str(model_type or "").strip()
+
+    @classmethod
     def last_preset_model(cls) -> str:
-        model_type = cls.load_presets().get(cls.LAST_PRESET_KEY, "sd")
-        return model_type if model_type in cls.MODEL_TYPES else "sd"
+        model_type = cls.normalize_preset_name(cls.load_presets().get(cls.LAST_PRESET_KEY, "sd"))
+        return model_type or "sd"
 
     @classmethod
     def save_last_preset_model(cls, model_type: str):
-        if model_type not in cls.MODEL_TYPES:
+        model_type = cls.normalize_preset_name(model_type)
+        if not model_type:
             return
         presets = cls.load_presets()
         presets[cls.LAST_PRESET_KEY] = model_type
@@ -165,6 +180,7 @@ class SeedVarianceEnhancer(scripts.Script):
     @classmethod
     def settings_for_model(cls, model_type: str) -> dict:
         settings = cls.DEFAULT_SETTINGS.copy()
+        model_type = cls.normalize_preset_name(model_type)
         saved = cls.load_presets().get(model_type, {})
         if isinstance(saved, dict):
             settings.update(saved)
@@ -195,7 +211,8 @@ class SeedVarianceEnhancer(scripts.Script):
 
     @classmethod
     def save_model_settings(cls, model_type: str, warmup_prompt: str, warmup_weight: float, steps: int, percentage: float, strength: int, decay: str, clamping: float):
-        if model_type not in cls.MODEL_TYPES:
+        model_type = cls.normalize_preset_name(model_type)
+        if not model_type:
             return
 
         presets = cls.load_presets()
@@ -452,6 +469,8 @@ class SeedVarianceEnhancer(scripts.Script):
             if cls.warmup_cond is None:
                 return cond
 
+        if weight >= 1.0:
+            return cls.warmup_cond
         return cls.apply_warmup_weight(cls.warmup_cond, cond)
 
     @classmethod
