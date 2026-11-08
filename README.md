@@ -7,8 +7,8 @@ This repository is a fork of [Haoming02/sd-forge-sve](https://github.com/Haoming
 ### Fork Changes
 
 - Added **Warmup Prompt**: an optional prompt used only during the first SVE steps.
-- When **Warmup Prompt** is set, the early steps use that prompt conditioning directly, similar to running a short first KSampler pass in ComfyUI and then continuing with the main prompt.
-- After the configured SVE steps, the extension stops modifying conditioning and normal generation continues from the latent state created by the warmup steps.
+- With **Warmup Blend = 1.0**, Forge runs two passes of the selected sampler and scheduler. The first pass starts from the generated noise, uses **Warmup Prompt**, and stops at **Steps** out of **Warmup Schedule Steps**. The second pass continues that latent at the same step index using the main prompt and the total step count selected in Forge, without adding the initial noise again. For the supplied workflow, set Warmup Schedule Steps to 12, Steps to 2, and Forge Steps to 14.
+- The two-pass path supports Forge samplers that accept an explicit sigma schedule. Other samplers retain the earlier prompt-switch behavior. **Warmup Blend** below 1.0 also retains the single-schedule blend.
 - The original random conditioning-noise mode is still available when **Warmup Prompt** is empty.
 - SVE parameters are no longer written to image infotext/metadata.
 
