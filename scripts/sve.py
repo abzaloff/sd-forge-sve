@@ -20,7 +20,6 @@ class SeedVarianceEnhancer(scripts.Script):
     DEFAULT_SETTINGS = {
         "warmup_prompt": "",
         "warmup_weight": 1.0,
-        "warmup_total_steps": 12,
         "steps": 2,
         "percentage": 1.0,
         "strength": 18,
@@ -41,7 +40,6 @@ class SeedVarianceEnhancer(scripts.Script):
     clamping: float = 1.0
     warmup_prompt: str = ""
     warmup_weight: float = 1.0
-    warmup_total_steps: int = 12
     two_stage_active: bool = False
     warmup_cond = None
     warmup_raw_cond = None
@@ -110,11 +108,6 @@ class SeedVarianceEnhancer(scripts.Script):
                     info="1.0 runs two sampler passes; lower values blend prompts on one schedule",
                     scale=1,
                 )
-                warmup_total_steps = gr.Slider(
-                    value=default_settings["warmup_total_steps"], minimum=1, maximum=self.MAX_STEPS,
-                    step=1, label="Warmup Schedule Steps",
-                    info="total steps of the first pass using the selected sampler and scheduler",
-                )
             with gr.Row():
                 steps = gr.Slider(value=default_settings["steps"], minimum=1, maximum=self.MAX_STEPS, step=1, label="Steps", info="the number of early steps affected by SVE")
                 percentage = gr.Slider(value=default_settings["percentage"], minimum=0.0, maximum=1.0, step=0.05, label="Percentage", info="used only without Warmup Prompt")
@@ -128,21 +121,21 @@ class SeedVarianceEnhancer(scripts.Script):
                 info="used only without Warmup Prompt",
             )
 
-            for component in (preset_model, warmup_prompt, warmup_weight, warmup_total_steps, steps, percentage, strength, clamping, decay):
+            for component in (preset_model, warmup_prompt, warmup_weight, steps, percentage, strength, clamping, decay):
                 component.do_not_save_to_config = True
 
             preset_model.change(
                 fn=self.load_model_settings,
                 inputs=[preset_model],
-                outputs=[warmup_prompt, warmup_weight, warmup_total_steps, steps, percentage, strength, decay, clamping, save_status],
+                outputs=[warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping, save_status],
             )
             save_preset.click(
                 fn=self.save_model_settings,
-                inputs=[preset_model, warmup_prompt, warmup_weight, warmup_total_steps, steps, percentage, strength, decay, clamping],
+                inputs=[preset_model, warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping],
                 outputs=[save_status],
             )
 
-        return [enable, warmup_prompt, warmup_weight, warmup_total_steps, steps, percentage, strength, decay, clamping]
+        return [enable, warmup_prompt, warmup_weight, steps, percentage, strength, decay, clamping]
 
     @classmethod
     def load_presets(cls) -> dict:
@@ -195,7 +188,6 @@ class SeedVarianceEnhancer(scripts.Script):
             settings.update(saved)
 
         settings["warmup_weight"] = max(0.0, min(1.0, float(settings["warmup_weight"])))
-        settings["warmup_total_steps"] = max(1, min(cls.MAX_STEPS, int(settings["warmup_total_steps"])))
         settings["steps"] = max(1, min(cls.MAX_STEPS, int(settings["steps"])))
         settings["percentage"] = max(0.0, min(1.0, float(settings["percentage"])))
         settings["strength"] = max(0, min(64, int(settings["strength"])))
@@ -211,7 +203,6 @@ class SeedVarianceEnhancer(scripts.Script):
         return [
             settings["warmup_prompt"],
             settings["warmup_weight"],
-            settings["warmup_total_steps"],
             settings["steps"],
             settings["percentage"],
             settings["strength"],
@@ -221,7 +212,7 @@ class SeedVarianceEnhancer(scripts.Script):
         ]
 
     @classmethod
-    def save_model_settings(cls, model_type: str, warmup_prompt: str, warmup_weight: float, warmup_total_steps: int, steps: int, percentage: float, strength: int, decay: str, clamping: float):
+    def save_model_settings(cls, model_type: str, warmup_prompt: str, warmup_weight: float, steps: int, percentage: float, strength: int, decay: str, clamping: float):
         model_type = cls.normalize_preset_name(model_type)
         if not model_type:
             return
@@ -230,7 +221,6 @@ class SeedVarianceEnhancer(scripts.Script):
         presets[model_type] = {
             "warmup_prompt": str(warmup_prompt or ""),
             "warmup_weight": max(0.0, min(1.0, float(warmup_weight))),
-            "warmup_total_steps": max(1, min(cls.MAX_STEPS, int(warmup_total_steps))),
             "steps": max(1, min(cls.MAX_STEPS, int(steps))),
             "percentage": max(0.0, min(1.0, float(percentage))),
             "strength": max(0, min(64, int(strength))),
@@ -241,7 +231,7 @@ class SeedVarianceEnhancer(scripts.Script):
         cls.save_presets(presets)
         return "<div style='height: 22px; line-height: 22px; color: var(--body-text-color-subdued); text-align: center;'>Saved</div>"
 
-    def before_process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, warmup_weight: float, warmup_total_steps: int, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
+    def before_process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, warmup_weight: float, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
         enable = bool(self.XYZ_CACHE.get("enable", enable))
         SeedVarianceEnhancer.enable = enable
         SeedVarianceEnhancer.two_stage_active = False
@@ -254,7 +244,6 @@ class SeedVarianceEnhancer(scripts.Script):
 
         SeedVarianceEnhancer.warmup_prompt = str(warmup_prompt or "").strip()
         SeedVarianceEnhancer.warmup_weight = float(warmup_weight)
-        SeedVarianceEnhancer.warmup_total_steps = int(warmup_total_steps)
         SeedVarianceEnhancer.warmup_cond = None
         SeedVarianceEnhancer.warmup_raw_cond = None
         SeedVarianceEnhancer.steps = min(int(self.XYZ_CACHE.get("steps", steps)), self.MAX_STEPS)
@@ -266,7 +255,7 @@ class SeedVarianceEnhancer(scripts.Script):
 
         self.XYZ_CACHE.clear()
 
-    def process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, warmup_weight: float, warmup_total_steps: int, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
+    def process_batch(self, p: StableDiffusionProcessingTxt2Img, enable: bool, warmup_prompt: str, warmup_weight: float, steps: int, percentage: float, strength: int, decay: str, clamping: float, **kwargs):
         if not SeedVarianceEnhancer.enable or not SeedVarianceEnhancer.warmup_prompt:
             return
 
@@ -298,11 +287,11 @@ class SeedVarianceEnhancer(scripts.Script):
         if "sigmas" not in inspect.signature(original_func).parameters:
             return
 
-        first_total = max(1, cls.warmup_total_steps)
         main_total = p.steps
-        split = min(cls.steps, first_total, main_total - 1)
+        split = min(cls.steps, main_total - 1)
         if split <= 0:
             return
+        first_total = max(split, main_total - split)
 
         # Forge loads the UNet in sampler.sample() after this hook. Encoding text
         # inside two_pass() would load CLIP after the UNet and offload its weights.
@@ -311,13 +300,6 @@ class SeedVarianceEnhancer(scripts.Script):
             distilled_cfg_scale=p.distilled_cfg_scale,
         )
         first_cond = prompt_parser.get_multicond_learned_conditioning(p.sd_model, prompts, first_total)
-        first_uncond = [
-            [
-                prompt_parser.ScheduledPromptConditioning(entry.end_at_step, cls.zero_conditioning(entry.cond))
-                for entry in batch[0].schedules
-            ]
-            for batch in first_cond.batch
-        ]
 
         def get_sigmas(processing, total):
             return original_get_sigmas(processing, first_total if total == main_total else total)
@@ -325,9 +307,10 @@ class SeedVarianceEnhancer(scripts.Script):
         def two_pass(model, x, *positional, **options):
             first_sigmas = options["sigmas"]
             main_sigmas = original_get_sigmas(p, main_total).to(x.device)
+            # Preserve Forge's negative conditioning. A zero negative from a
+            # CFG 1 workflow is not suitable for guided SDXL or Anima runs.
             first_args = options["extra_args"].copy()
             first_args["cond"] = first_cond
-            first_args["uncond"] = first_uncond
 
             first_options = options.copy()
             first_options["sigmas"] = first_sigmas[:split + 1]
@@ -355,14 +338,6 @@ class SeedVarianceEnhancer(scripts.Script):
         sampler.get_sigmas = get_sigmas
         sampler.func = two_pass
         cls.two_stage_active = True
-
-    @staticmethod
-    def zero_conditioning(value):
-        if isinstance(value, torch.Tensor):
-            return torch.zeros_like(value)
-        if isinstance(value, dict):
-            return {key: SeedVarianceEnhancer.zero_conditioning(item) for key, item in value.items()}
-        return value
 
     @classmethod
     def apply_decay(cls, current_step, total_steps, strength):

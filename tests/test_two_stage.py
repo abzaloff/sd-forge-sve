@@ -14,7 +14,7 @@ SOURCE = Path(__file__).resolve().parents[1] / "scripts" / "sve.py"
 tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
 original_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "SeedVarianceEnhancer")
 methods = [node for node in original_class.body if isinstance(node, ast.FunctionDef) and node.name in {
-    "process_before_every_sampling", "zero_conditioning",
+    "process_before_every_sampling",
 }]
 test_class = ast.ClassDef(name="SeedVarianceEnhancer", bases=[], keywords=[], body=methods, decorator_list=[])
 module = ast.fix_missing_locations(ast.Module(body=[test_class], type_ignores=[]))
@@ -52,7 +52,7 @@ SVE = namespace["SeedVarianceEnhancer"]
 
 
 class TwoStageTest(unittest.TestCase):
-    def test_handoff_uses_two_schedules_and_main_prompt(self):
+    def test_handoff_uses_auto_shortened_warmup_schedule_and_main_prompt(self):
         calls = []
         callback_steps = []
         encoded = []
@@ -93,7 +93,7 @@ class TwoStageTest(unittest.TestCase):
         SVE.enable = True
         SVE.warmup_prompt = "abstraction"
         SVE.warmup_weight = 1.0
-        SVE.warmup_total_steps = 12
+        SVE.warmup_total_steps = 9  # A stale saved value must have no effect.
         SVE.steps = 2
         SVE().process_before_every_sampling(p)
 
@@ -101,15 +101,17 @@ class TwoStageTest(unittest.TestCase):
         sampler_started[0] = True
         first_schedule = sampler.get_sigmas(p, p.steps)
         model = SimpleNamespace(step=0, steps=14, total_steps=14)
+        negative = object()
         output = sampler.func(model, torch.tensor([0.0]), sigmas=first_schedule,
-                              extra_args={"cond": "user prompt", "uncond": "user negative"},
+                              extra_args={"cond": "user prompt", "uncond": negative},
                               callback=lambda data: callback_steps.append(data["i"]))
 
         self.assertEqual([12.0, 11.0, 10.0], calls[0][0].tolist())
         self.assertEqual(list(range(14, -1, -1))[2:], calls[1][0].tolist())
         self.assertTrue(torch.equal(calls[0][1]["cond"].batch[0][0].schedules[0].cond, torch.ones(2)))
         self.assertEqual("user prompt", calls[1][1]["cond"])
-        self.assertTrue(torch.equal(calls[0][1]["uncond"][0][0].cond, torch.zeros(2)))
+        self.assertIs(calls[0][1]["uncond"], negative)
+        self.assertIs(calls[1][1]["uncond"], negative)
         self.assertEqual([12, 14], [call[2] for call in calls])
         self.assertEqual(list(range(14)), callback_steps)
         self.assertEqual(2.0, output.item())
